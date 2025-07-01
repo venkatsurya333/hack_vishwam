@@ -5,6 +5,8 @@ import folium
 import requests
 import re
 
+from transformers import MarianMTModel, MarianTokenizer
+
 # -------------------- Page Setup --------------------
 st.set_page_config(page_title="📍 JanmaBhoomi Cultural Explorer", layout="wide")
 st.title("🇮🇳 JanmaBhoomi — Discover India's Local Stories")
@@ -88,13 +90,6 @@ def fetch_summary(place):
         return res.json().get("extract", "No summary available.")
     return "Could not fetch summary."
 
-def translate_text(text, lang):
-    translations = {
-        "Telugu": "[TE] " + text,
-        "Hindi": "[HI] " + text
-    }
-    return translations.get(lang, text)
-
 def fetch_image(place):
     commons_api = "https://en.wikipedia.org/w/api.php"
     params = {
@@ -131,6 +126,20 @@ def fetch_political_significance(place):
             return summary
     return "No notable political information found for this place."
 
+def fetch_economy_and_industry(place):
+    titles_to_try = [
+        f"Economy of {place}",
+        f"{place} economy",
+        f"Industries in {place}",
+        f"Industrial development in {place}",
+        f"{place} industrial area"
+    ]
+    for title in titles_to_try:
+        summary = fetch_specific_summary(title)
+        if summary and len(summary) > 50:
+            return summary
+    return "No detailed economic or industrial information found."
+
 def detect_languages(place):
     place = place.lower()
     telugu_states = ["andhra", "telangana", "hyderabad", "visakhapatnam", "vijayawada", "warangal"]
@@ -146,6 +155,40 @@ def detect_languages(place):
 
 def extract_proper_nouns(text):
     return list(set(re.findall(r'\b(?:[A-Z][a-z]+\s?){1,4}', text)))
+
+# --- Translation Setup using Hugging Face Models ---
+@st.cache_resource(show_spinner=False)
+def load_model(lang_code):
+    model_name_map = {
+        "Hindi": "Helsinki-NLP/opus-mt-en-hi",
+        "Telugu": "Helsinki-NLP/opus-mt-en-te"
+    }
+    if lang_code not in model_name_map:
+        return None, None
+    model_name = model_name_map[lang_code]
+    tokenizer = MarianTokenizer.from_pretrained(model_name)
+    model = MarianMTModel.from_pretrained(model_name)
+    return tokenizer, model
+
+def translate_text(text, lang):
+    if lang == "English" or not text.strip():
+        return text
+    
+    tokenizer, model = load_model(lang)
+    if not tokenizer or not model:
+        # fallback if unsupported language
+        return f"[{lang[:2].upper()}] {text}"
+
+    sentences = [s.strip() for s in text.split('.') if s.strip()]
+    translated_sentences = []
+    batch_size = 5
+    for i in range(0, len(sentences), batch_size):
+        batch = sentences[i:i+batch_size]
+        inputs = tokenizer(batch, return_tensors="pt", padding=True, truncation=True)
+        translated = model.generate(**inputs)
+        tgt_texts = [tokenizer.decode(t, skip_special_tokens=True) for t in translated]
+        translated_sentences.extend(tgt_texts)
+    return ". ".join(translated_sentences)
 
 # --- Main Display ---
 if st.button("Explore"):
@@ -203,17 +246,23 @@ if st.button("Explore"):
             else:
                 st.info("No detailed educational info available.")
 
+            st.subheader("🏭 Economic & Industrial Information")
+            economy_text = fetch_economy_and_industry(place)
+            st.write(economy_text)
+
             st.subheader("🏛️ Political Significance")
             st.write(fetch_political_significance(place))
 
             st.subheader("🗣️ Languages Commonly Spoken")
             st.write(detect_languages(place))
+
             # --- Download Knowledge Card ---
             download_text = f"""{place.title()} - Cultural Summary ({lang})\n\n{final_summary}\n
 ---\n📌 Famous For:\n{fetch_specific_summary(place)}\n
 🗺️ Tourist Attractions:\n{tourism}\n
 🏛️ Cultural Importance:\n{culture}\n
 🎓 Educational Institutions:\n{"".join("- " + p + "\n" for p in edu_points)}\n
+🏭 Economy & Industry:\n{economy_text}\n
 🏛️ Political Significance:\n{fetch_political_significance(place)}\n
 🗣️ Languages Spoken:\n{detect_languages(place)}\n
 Source: Wikipedia/Wikimedia"""
@@ -224,6 +273,7 @@ Source: Wikipedia/Wikimedia"""
                 file_name=f"{place}_summary.txt",
                 mime="text/plain"
             )
+
 # Footer
 st.markdown("---")
 st.caption("🔗 Cultural data sourced from Wikipedia & Wikimedia APIs.")
